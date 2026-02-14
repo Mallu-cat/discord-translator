@@ -1,3 +1,4 @@
+print("=== BOT VERSION: 2026-02-15 A ===")
 import os
 import discord
 import aiohttp
