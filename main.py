@@ -1,4 +1,5 @@
-print("=== BOT VERSION: 2026-02-15 A ===")
+print("=== RENDER PULLED MY LATEST CODE v1 ===", flush=True)
+
 import os
 import discord
 import aiohttp
