@@ -1,21 +1,15 @@
-print("=== Translator Bot START (debug build) ===", flush=True)
+print("=== Translator Bot START (deep-translator build) ===", flush=True)
 
 import os
 import discord
-import aiohttp
 from langdetect import detect
+from deep_translator import GoogleTranslator
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# LibreTranslate public instance (can rate-limit; you can switch instances later)
-LIBRE_URL = os.getenv("LIBRE_URL", "https://translate.argosopentech.com/translate")
-
-# Auto-translate: if message is NOT English, reply with EN translation
 AUTO_TO_EN = True
 
 intents = discord.Intents.default()
-
-# These help ensure the gateway actually sends message events in all contexts
 intents.message_content = True
 intents.messages = True
 intents.guilds = True
@@ -24,29 +18,15 @@ intents.dm_messages = True
 client = discord.Client(intents=intents)
 
 
-async def libre_translate(session: aiohttp.ClientSession, text: str, target: str) -> str:
-    payload = {
-        "q": text,
-        "source": "auto",
-        "target": target,
-        "format": "text",
-    }
-    async with session.post(
-        LIBRE_URL,
-        data=payload,
-        timeout=aiohttp.ClientTimeout(total=20),
-    ) as resp:
-        if resp.status != 200:
-            body = await resp.text()
-            raise RuntimeError(f"Translate API error {resp.status}: {body[:200]}")
-        data = await resp.json()
-        return data.get("translatedText", "").strip()
+def safe_translate(text: str, target: str) -> str:
+    # GoogleTranslator supports many language codes like "en", "de", "et", "ru", etc.
+    return GoogleTranslator(source="auto", target=target).translate(text) or ""
 
 
 def looks_like_lang_code(s: str) -> bool:
     s = s.strip().lower()
-    # Add more if you want
-    return s in {"en", "de", "tr", "pl", "ja", "ko", "ar"}
+    # Expand as needed
+    return s in {"en", "de", "et", "ru", "fi", "sv", "pl", "tr", "es", "fr", "it", "pt", "nl", "ja", "ko", "ar"}
 
 
 @client.event
@@ -56,12 +36,11 @@ async def on_ready():
 
 @client.event
 async def on_message(message: discord.Message):
-    # --- DEBUG: log every message event we receive ---
+    # Log every message event we receive
     try:
         author = f"{message.author} ({message.author.id})"
         channel = f"{getattr(message.channel, 'name', 'DM')} ({message.channel.id})"
         guild = "DM" if message.guild is None else str(message.guild.id)
-
         content_len = 0 if message.content is None else len(message.content)
         print(
             f"[on_message] guild={guild} channel={channel} author={author} "
@@ -71,14 +50,12 @@ async def on_message(message: discord.Message):
     except Exception as e:
         print("[on_message] logging failed:", repr(e), flush=True)
 
-    # Ignore bots (including itself)
     if message.author.bot:
         return
 
     content = (message.content or "").strip()
 
-    # --- Ultra-simple test (NO translation API involved) ---
-    # Type "ping" anywhere the bot can read; it should reply.
+    # ping test
     if content.lower() == "ping":
         try:
             await message.reply("pong ✅", mention_author=False)
@@ -86,23 +63,20 @@ async def on_message(message: discord.Message):
             print("[reply failed on ping]:", repr(e), flush=True)
         return
 
-    # If no content, nothing more to do (but we already logged the event)
     if not content:
         return
 
-    # --- A) Reply-translate mode ---
-    # If user replies to a message and sends "DE" / "TR" / etc, translate replied message.
+    # A) Reply-translate mode: reply to a message with just "de" / "en" / etc
     if message.reference and looks_like_lang_code(content):
         try:
             replied = await message.channel.fetch_message(message.reference.message_id)
-            if not replied.content:
+            text = (replied.content or "").strip()
+            if not text:
                 return
-            async with aiohttp.ClientSession() as session:
-                translated = await libre_translate(session, replied.content, content.lower())
+            translated = safe_translate(text, content.lower()).strip()
             if translated:
                 await message.reply(f"**{content.upper()}**: {translated}", mention_author=False)
         except Exception as e:
-            # Log + tell user
             print("[reply-translate failed]:", repr(e), flush=True)
             try:
                 await message.reply(f"❌ Translate failed: {e}", mention_author=False)
@@ -110,11 +84,9 @@ async def on_message(message: discord.Message):
                 print("[failed to send error reply]:", repr(e2), flush=True)
         return
 
-    # --- B) Command mode ---
-    # tr <lang> <text>
-    # Example: "tr de hello" or reply to a message with "tr de"
+    # B) Command mode: tr <lang> <text> (or reply with "tr <lang>")
     if content.lower().startswith("tr "):
-        parts = content.split(maxsplit=2)  # ["tr", "de", "text..."]
+        parts = content.split(maxsplit=2)
         if len(parts) < 2:
             try:
                 await message.reply(
@@ -128,11 +100,10 @@ async def on_message(message: discord.Message):
         target = parts[1].lower()
         text = parts[2] if len(parts) >= 3 else ""
 
-        # If no text provided, try to translate the replied-to message
         if not text and message.reference:
             try:
                 replied = await message.channel.fetch_message(message.reference.message_id)
-                text = replied.content or ""
+                text = (replied.content or "").strip()
             except Exception as e:
                 print("[failed to fetch replied message]:", repr(e), flush=True)
                 text = ""
@@ -145,8 +116,7 @@ async def on_message(message: discord.Message):
             return
 
         try:
-            async with aiohttp.ClientSession() as session:
-                translated = await libre_translate(session, text, target)
+            translated = safe_translate(text, target).strip()
             if translated:
                 await message.reply(f"**{target.upper()}**: {translated}", mention_author=False)
         except Exception as e:
@@ -157,23 +127,20 @@ async def on_message(message: discord.Message):
                 print("[failed to send error reply]:", repr(e2), flush=True)
         return
 
-    # --- C) Auto mode: non-English -> English ---
+    # C) Auto mode: non-English -> English
     if AUTO_TO_EN:
         try:
             lang = detect(content)
         except Exception as e:
-            # language detection can fail on emojis etc.
             print("[langdetect failed]:", repr(e), flush=True)
             return
 
         if lang != "en":
             try:
-                async with aiohttp.ClientSession() as session:
-                    translated = await libre_translate(session, content, "en")
+                translated = safe_translate(content, "en").strip()
                 if translated and translated.lower() != content.lower():
                     await message.reply(f"**EN**: {translated}", mention_author=False)
             except Exception as e:
-                # don't spam channel; just log
                 print("[auto translate error]:", repr(e), flush=True)
 
 
